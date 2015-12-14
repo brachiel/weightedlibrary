@@ -12,14 +12,18 @@ else:
 
 
 class Rater(object):
+    name = None
+
     def rate(self, obj, context):
         """Return a rating for object in the given context in [0,1]"""
         raise NotImplementedError
 
     def __repr__(self):
-        return self.__class__.__name__
+        return self.name
 
 class BpmRater(Rater):
+    name = "Bpm"
+
     def __init__(self, target_bpm=80, spread=20):
         self.target_bpm = target_bpm
         self.spread = spread
@@ -34,10 +38,14 @@ class BpmRater(Rater):
         return max(0., raw_rating)
         
 class SongRatingRater(Rater):
+    name = "SongRating"
+
     def rate(self, song, song_list):
         return song("~#rating")
 
 class RepeaterRater(Rater):
+    name = "Repeater"
+
     def rate(self, song, song_list):
         try:
             last_song = song_list[-1]
@@ -80,49 +88,56 @@ class RepeaterRater(Rater):
         return total_rating
 
 class AveragedRater(Rater):
+    name = "Averaged"
+
     def __init__(self):
         self.raters = []
-        self.weight_sum = 0.
 
     def add_rater(self, weight, rater):
         self.raters.append((weight, rater))
-        self.weight_sum += weight
 
     def rate_with_details(self, song, song_list):
-        rate = 0.
+        score = 0.
         rating_details = {}
         for weight, rater in self.raters:
-            this_rating = weight/self.weight_sum * rater.rate(song, song_list)
-            rating_details[rater] = this_rating
-            rate += this_rating
+            this_score = weight * rater.rate(song, song_list)
+            rating_details[rater] = this_score
+            score += this_score
 
-        return max(0, rate), rating_details 
+        return max(0, score), rating_details 
 
     def rate(self, song, song_list):
-        rating, _ = self.rate_with_details(song, song_list)
-        return rating
+        score, _ = self.rate_with_details(song, song_list)
+        return score
 
 class ModifiedAveragedRater(AveragedRater):
+    name = "ModifiedAveraged"
+
     def __init__(self):
         super(ModifiedAveragedRater, self).__init__()
         self.modifiers = []
+        self.last_rating = {"base":{}, "modifier": {}}
 
     def add_modifier(self, weight, rater):
         self.modifiers.append((weight, rater))
 
     def rate_with_details(self, song, song_list):
-        rate, rating_details = super(ModifiedAveragedRater, self).rate_with_details(song, song_list)
+        score, rating_details = super(ModifiedAveragedRater, self).rate_with_details(song, song_list)
 
-        for rater, rating in rating_details.items():
-            rating_details[rater] = ('+', rating)
+        # save rating details for later use
+        # Newly initialize! Otherwise we share information between rating runs
+        self.last_rating = { "base":{}, "modifier":{} }
+        self.last_rating["base"] = rating_details
 
         for weight, modifier in self.modifiers:
-            this_rating = weight * modifier.rate(song, song_list)
-            rating_details[modifier] = ('*', this_rating)
-            rate *= this_rating
+            this_score = weight * modifier.rate(song, song_list)
+            self.last_rating["modifier"][modifier] = this_score # save for later use
+            score *= this_score
 
-        return rate, rating_details
+        return score
 
+    def rating_details(self):
+        return self.last_rating
 
 class RatedLibrary():
     def __init__(self, library, rater):
@@ -139,45 +154,65 @@ class RatedLibrary():
         playlist = []
         total_play_length = 0.
 
+        # if we need to create a playlist with a specific duration, we need to know how long the
+        # initial playlist takes
         for song in init_playlist:
             total_play_length += song("~#length")
-        print "Total legth in Queue: %i, goal: %i" % (total_play_length, play_length)
+
+        if debug:
+            print "Total length in Queue: %i, goal: %i" % (total_play_length, play_length)
 
         songs = self.library[:] # make a copy of the song list
 
         # remove the songs already in the initial playlist
         for song in init_playlist:
-            songs.remove(song)
+            try:    
+                songs.remove(song)
+            except ValueError:
+                pass
 
-        while len(songs) > 0 and (num_items is None or len(playlist) <= num_items) and (play_length is None or total_play_length < play_length):
-            ratings = {}
-            total_rating = 0.
+        while (len(songs) > 0 and       # as long as there's still songs to choose from
+               (num_items is None or len(playlist) <= num_items) and        # and the total duration is not reached
+               (play_length is None or total_play_length < play_length)):       # and we have not found enough songs
+            scores = {}
+            rating_details = {}
+
+            total_score = 0.
 
             # Rate all songs depending on the current playlist
             for song in songs:
-                ratings[song] = {}
-                ratings[song]["rating"], ratings[song]["details"] = self.rater.rate_with_details(song, playlist)
-                total_rating += ratings[song]["rating"]
+                scores[song] = self.rater.rate_with_details(song, playlist)
+                if debug:
+                    rating_details[song] = self.rater.rating_details()
+                total_score += scores[song]
 
-            random_score = random.random() * total_rating
+            random_score = random.random() * total_score
             current_score = 0.
 
-            for song, rating in ratings.items():
-                current_score += rating["rating"]
+            for song, score in scores.items():
+                current_score += score
                 if current_score >= random_score:
                     break
+            else:
+                # wasn't able to find a song; this should never be possble
+                raise RuntimeError("Couldn't find song; this should never happen")
+            # the last song, score of the above for loop is the chosen one :D
 
             if debug:
-                print "%s: %f\n    %s" % (song("title"), rating["rating"], '\n    '.join(["%s=%s" % (rater, rat) for rater,rat in rating["details"].items()]))
+                # here, score is still the score from the above for loop
+                song["~#score_total"] = score
+                # times scores it by 100 to make it more readable
+                print "%s (Total: %i)" % (song("title"), score)
 
-                for rater, rat in rating["details"].items():
-                    rater_name = repr(rater)
-                    rater_name = rater_name[:-5].lower()
-                    song["~#score_%s" % rater_name] = rat[1] # 0 is sign, 1 is actual rating
-               
-                song["~#score_total"] = rating["rating"]
+                for rater, score in rating_details[song]["base"].iteritems():
+                    song["~#score_%s" % rater.name.lower()] = score
+                    print "    +%.2f (%s)" % (score, rater)
 
-            songs.remove(song) # Remove this song from the songlist
+                for rater, score in rating_details[song]["modifier"].iteritems():
+                    song["~#score_%s" % rater.name.lower()] = score
+                    print "    *%.2f (%s)" % (score, rater)
+
+            songs.remove(song) # Remove this song from the potential songlist
             playlist.append(song) # Add this song to the playlist
             total_play_length += song("~#length")
 
@@ -246,7 +281,7 @@ class WeightedPlaylist(SongsMenuPlugin):
 
         # Create a playlist out of the selected songs that lasts at least 5 hours
         current_queue = list(app.window.playlist.q.itervalues()) # Make a copy
-        playlist = self.rated_library.create_playlist(init_playlist=current_queue, play_length=5*60*60, debug=True)
+        playlist = self.rated_library.create_playlist(init_playlist=current_queue, play_length=5*60*60)
 
         # Append to current queue
         app.window.playlist.enqueue(playlist)
@@ -254,6 +289,8 @@ class WeightedPlaylist(SongsMenuPlugin):
         return True
         
 class WeightedPlaylistAll(WeightedPlaylist):
+    """Same as WeightedPlaylist but ignore the selection and take all available songs."""
+
     PLUGIN_ID = "weightedplaylistall"
     PLUGIN_NAME = _("Weighted playlist")
     PLUGIN_ICON = "gtk-media-next"
