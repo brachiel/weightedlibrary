@@ -2,15 +2,12 @@
 import time
 
 if __name__ != "__main__":
-    from quodlibet import app, qltk
+    from quodlibet import app
     from quodlibet.plugins.songsmenu import SongsMenuPlugin
 
     from gi.repository import Gtk
 else:
     _ = lambda x: x
-    class qltk:
-        class Icons:
-            MEDIA_SKIP_FORWARD = ""
 
     class SongsMenuPlugin:
         pass
@@ -23,7 +20,7 @@ class BpmTagger(SongsMenuPlugin):
 
     PLUGIN_ID = "bpmtagger"
     PLUGIN_NAME = _("BPM Tagger")
-    PLUGIN_ICON = qltk.Icons.MEDIA_SKIP_FORWARD
+    PLUGIN_ICON = Gtk.STOCK_FIND_AND_REPLACE
     PLUGIN_DESC = _("Tap to the music to tag beats per minute of the current song")
 
     def plugin_songs(self, songs):
@@ -36,49 +33,72 @@ class BpmTaggerWindow(Gtk.Window):
     def __init__(self):
         super(BpmTaggerWindow, self).__init__()
 
-        #self.set_size_request(400, 400)
+        vbox = Gtk.VBox(spacing=20)
+        self.add(vbox)
 
-        hbox = Gtk.Box(spacing=6)
-        self.add(hbox)
-        hbox.show()
+        topbox = Gtk.HBox(spacing=10)
+        botbox = Gtk.HBox(spacing=10)
+        vbox.pack_start(topbox, True, True, 0)
+        vbox.pack_start(botbox, True, True, 0)
+        vbox.show()
 
-        fix_label = Gtk.Label("Tap to the beat")
+        # top box
+        self.top_label = Gtk.Label()
+        self.song_bpm_label = Gtk.Label()
+        
+        reset_button = Gtk.Button(label="Reset")
+        reset_button.connect("clicked", self.on_reset_clicked)
+
+        # middle box
+        self.mid_label = Gtk.Label("Tap to the beat")
         self.current_bpm_label = Gtk.Label("-")
 
         tapper_button = Gtk.Button(label="Tap!")
         tapper_button.connect("pressed", self.on_tapper_pressed)
 
-        reset_button = Gtk.Button(label="Reset")
-        reset_button.connect("clicked", self.on_reset_clicked)
-
+        # bottom box
         save_button = Gtk.Button(label="Save")
         save_button.connect("clicked", self.on_save_clicked)
+        save_button.options('disabled',True)
 
-        hbox.pack_start(fix_label, True, True, 0)
-        hbox.pack_start(self.current_bpm_label, True, True, 0)
-        hbox.pack_start(tapper_button, True, True, 0)
-        hbox.pack_start(reset_button, True, True, 0)
-        hbox.pack_start(save_button, True, True, 0)
+        # packing
+
+        # mix top and mid boxes such that they are aligned
+        labelbox = Gtk.VBox()
+        bpmbox = Gtk.VBox()
+        buttonbox = Gtk.VBox()
+
+        labelbox.pack_start(self.top_label, True, True, 0)
+        bpmbox.pack_start(self.song_bpm_label, True, True, 0)
+        buttonbox.pack_start(reset_button, True, True, 0)
+
+        labelbox.pack_start(self.mid_label, True, True, 0)
+        bpmbox.pack_start(self.current_bpm_label, True, True, 0)
+        buttonbox.pack_start(tapper_button, True, True, 0)
+
+        topbox.pack_start(labelbox, True, True, 0)
+        topbox.pack_start(bpmbox, True, True, 0)
+        topbox.pack_start(buttonbox, True, True, 0)
+        botbox.pack_start(save_button, True, True, 0)
         
         ## initialisation
         self.reset()
-
-        this_song = app.window.playlist.current
-        print "BPM of the current song: %s" % this_song("bpm")
     
     def reset(self):
         self.current_bpm = None
         self.current_taps = None
         self.current_run_start = None
 
+        self.current_song = app.player.song
+
+        self.current_bpm_label.set_label('-')
+        self.top_label.set_label("Current song: " + self.current_song("title"))
+        self.song_bpm_label.set_label(self.current_song("bpm") or "-")
 
     def on_tapper_pressed(self, event):
         if self.current_taps is None: # First tap
             self.current_taps = 0
             self.current_run_start = time.time()
-
-            print "BPM first tap"
-
             return
 
         self.current_taps += 1
@@ -93,16 +113,10 @@ class BpmTaggerWindow(Gtk.Window):
         self.current_bpm_label.set_label(str(int(self.current_bpm)))
     
     def on_save_clicked(self, event):
-        this_song = app.window.playlist.current
-        print "BPM of the current song: %s" % this_song("bpm")
-
         bpm = int(self.current_bpm)
-        this_song["~#bpm"] = bpm
-
-        self.current_bpm_label.set_label('Saved')
+        self.current_song["bpm"] = str(bpm) # bpm (apparently) is a string attribute
         self.reset()
     
     def on_reset_clicked(self, event):
-        self.current_bpm_label.set_label('-')
         self.reset()
       
