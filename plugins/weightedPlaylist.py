@@ -1,15 +1,20 @@
+# -*- coding: utf-8 -*-
+# Copyright 2005-2009 Joe Wreschnig, Steven Robertson
+#                2012 Nick Boultbee
+#                2015 Wanja Chresta
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 3 as
+# published by the Free Software Foundation
 
 import random
 
-if __name__ != "__main__":
-    from quodlibet.plugins.songsmenu import SongsMenuPlugin
-    from quodlibet import app
-else:
-# __main__ mode. Simulate some interfaces for quod libet
-    _ = lambda x: x
-    class PlayOrderPlugin:
-        pass
+from gi.repository import Gtk
 
+from quodlibet.plugins.songsmenu import SongsMenuPlugin
+from quodlibet import app
+from quodlibet import config
+from quodlibet import util
 
 class Rater(object):
     name = None
@@ -265,8 +270,21 @@ class WeightedPlaylist(SongsMenuPlugin):
     PLUGIN_ICON = "gtk-media-next"
     PLUGIN_DESC = _("From a selection of songs, enqueue a playlist of them accoring to weighted ratings.")
 
+    # keys for configuration screen
+    keys = [
+        ("rating", _("Rated higher")),
+        ("lastplayed", _("Played more recently"))
+    ]
+
+    # configuration values
+    weights = {"rating":0.0, "lastplayed":0.0}
+
     def __init__(self, songs, library):
         super(WeightedPlaylist, self).__init__(songs, library)
+
+        for (key, text) in self.keys:
+            val = config.getfloat("plugins", "randomalbum_%s" % key, 0.0)
+            self.weights[key] = val
 
         rater = ModifiedAveragedRater()
         rater.add_rater(weight=100.,  rater=SongRatingRater())
@@ -287,6 +305,66 @@ class WeightedPlaylist(SongsMenuPlugin):
         app.window.playlist.enqueue(playlist)
 
         return True
+    
+    # we need to use classmethod since we're not an EventPlugin and are not instanciated until we're called.
+    @classmethod
+    def PluginPreferences(cls, plugin_container):
+        # Almost copied identically from randomalbum plugin
+        def changed_cb(hscale, key):
+            val = hscale.get_value()
+            cls.weights[key] = val
+            config.set("plugins", "weightedlibrary_%s" % key, val)
+
+        vbox = Gtk.VBox(spacing=12)
+        table = Gtk.Table(n_rows=len(cls.keys) + 1, n_columns=3)
+        table.set_border_width(3)
+
+        frame = Gtk.Frame(label=_("Weights"))
+
+        frame.add(table)
+        vbox.pack_start(frame, True, True, 0)
+
+        # Less label
+        less_lbl = Gtk.Label()
+        arr = Gtk.Arrow(arrow_type=Gtk.ArrowType.LEFT,
+                        shadow_type=Gtk.ShadowType.OUT)
+        less_lbl.set_markup("<i>%s</i>" % util.escape(_("avoid")))
+        less_lbl.set_alignment(0, 0)
+        hb = Gtk.HBox(spacing=0)
+        hb.pack_start(arr, False, True, 0)
+        hb.pack_start(less_lbl, True, True, 0)
+        table.attach(hb, 1, 2, 0, 1, xpadding=3,
+                     xoptions=Gtk.AttachOptions.FILL)
+        # More label
+        more_lbl = Gtk.Label()
+        arr = Gtk.Arrow(arrow_type=Gtk.ArrowType.RIGHT,
+                        shadow_type=Gtk.ShadowType.OUT)
+        more_lbl.set_markup("<i>%s</i>" % util.escape(_("prefer")))
+        more_lbl.set_alignment(1, 0)
+        hb = Gtk.HBox(spacing=0)
+        hb.pack_end(arr, False, True, 0)
+        hb.pack_end(more_lbl, True, True, 0)
+        table.attach(hb, 2, 3, 0, 1, xpadding=3,
+                     xoptions=Gtk.AttachOptions.FILL)
+
+        for (idx, (key, text)) in enumerate(cls.keys):
+            lbl = Gtk.Label(label=text)
+            lbl.set_alignment(0, 0)
+            table.attach(lbl, 0, 1, idx + 1, idx + 2,
+                         xoptions=Gtk.AttachOptions.FILL,
+                         xpadding=3, ypadding=3)
+            adj = Gtk.Adjustment(lower=-1.0, upper=1.0, step_increment=0.1)
+            hscale = Gtk.HScale(adjustment=adj)
+            hscale.set_value(cls.weights[key])
+            hscale.set_draw_value(False)
+            hscale.set_show_fill_level(False)
+            hscale.connect("value-changed", changed_cb, key)
+            lbl.set_mnemonic_widget(hscale)
+            table.attach(hscale, 1, 3, idx + 1, idx + 2,
+                         xpadding=3, ypadding=3)
+
+        return vbox
+
         
 class WeightedPlaylistAll(WeightedPlaylist):
     """Same as WeightedPlaylist but ignore the selection and take all available songs."""
