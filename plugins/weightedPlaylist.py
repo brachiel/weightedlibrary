@@ -17,6 +17,7 @@ from quodlibet import config
 from quodlibet import util
 
 class Rater(object):
+    """Rating machine that gives scores to objects in [0,1] depending on the context"""
     name = None
 
     def rate(self, obj, context):
@@ -32,7 +33,7 @@ class BpmRater(Rater):
     def __init__(self, target_bpm=80, spread=20):
         self.target_bpm = target_bpm
         self.spread = spread
-        
+
     def rate(self, song, song_list):
         try:
             song_bpm = int(song('~#bpm'))
@@ -41,7 +42,7 @@ class BpmRater(Rater):
 
         raw_rating = 1.-(song_bpm - self.target_bpm)/(2.*self.spread)
         return max(0., raw_rating)
-        
+
 class SongRatingRater(Rater):
     name = "SongRating"
 
@@ -65,7 +66,7 @@ class RepeaterRater(Rater):
         # How many repetitions are ok?
         # Second in tuple is weight; weights needs to add to 1
         # Repetition = 0 attributes force a score of 0 on repetition
-        attributes = { 'genre': (1, 1.), 'artist': (0, 0) }
+        attributes = { 'genre': (2, 1.), 'artist': (0, 0) } # genre should be repeated twice, arist should never be repeated
         for attribute, (allowed_repetitions, weight) in attributes.items():
             this = song(attribute)
             previous = last_song(attribute)
@@ -79,7 +80,7 @@ class RepeaterRater(Rater):
                     repetitions = 2
                 else:
                     repetitions = 1
-            
+
             if repetitions > allowed_repetitions:
                 # We'd be repeating more than we should =(
                 return 0. # Force 0
@@ -93,6 +94,7 @@ class RepeaterRater(Rater):
         return total_rating
 
 class AveragedRater(Rater):
+    """Combine multiple raters into one. The score is a weighted sum of the components."""
     name = "Averaged"
 
     def __init__(self):
@@ -109,13 +111,14 @@ class AveragedRater(Rater):
             rating_details[rater] = this_score
             score += this_score
 
-        return max(0, score), rating_details 
+        return max(0, score), rating_details
 
     def rate(self, song, song_list):
         score, _ = self.rate_with_details(song, song_list)
         return score
 
 class ModifiedAveragedRater(AveragedRater):
+    """Combine an averaged rater with modificators; Base raters are a weighted sum, modifiers multiply the score after"""
     name = "ModifiedAveraged"
 
     def __init__(self):
@@ -171,7 +174,7 @@ class RatedLibrary():
 
         # remove the songs already in the initial playlist
         for song in init_playlist:
-            try:    
+            try:
                 songs.remove(song)
             except ValueError:
                 pass
@@ -260,7 +263,7 @@ if __name__ == '__main__':
         library.append(FakeSong())
 
     test(library)
-    
+
 
 #####################################
 # Quod Libet Plugin
@@ -271,28 +274,44 @@ class WeightedPlaylist(SongsMenuPlugin):
     PLUGIN_DESC = _("From a selection of songs, enqueue a playlist of them accoring to weighted ratings.")
 
     # keys for configuration screen
-    keys = [
-        ("rating", _("Rated higher")),
-        ("lastplayed", _("Played more recently"))
-    ]
+    options = {
+        "weights": [
+            ("rating", _("Rated higher")),
+            ("tempo", _("Importance of tempo")),
+            ("lastplayed", _("Played more recently"))
+        ],
+        "values": [
+            ("tempo_target", _("Average tempo"), 60, 130),
+            ("tempo_spread", _("Spread of tempo"), 0, 40),
+        ],
+    }
 
     # configuration values
-    weights = {"rating":0.0, "lastplayed":0.0}
+    weights = {}
 
     def __init__(self, songs, library):
         super(WeightedPlaylist, self).__init__(songs, library)
 
-        for (key, text) in self.keys:
-            val = config.getfloat("plugins", "randomalbum_%s" % key, 0.0)
+        for key,_ in self.options["weights"]:
+            val = config.getfloat("plugins", "weightedlibrary_%s" % key, 0.0)
+            self.weights[key] = val
+        for key,_,min_value,max_value in self.options["values"]:
+            val = config.getfloat("plugins", "weightedlibrary_%s" % key, (min_value+max_value)/2.)
             self.weights[key] = val
 
+
+        for key,val in self.weights.items():
+            print "%s = %s" % (key,val)
+
         rater = ModifiedAveragedRater()
-        rater.add_rater(weight=100.,  rater=SongRatingRater())
-        rater.add_rater(weight=30.,   rater=BpmRater())
+        # Raters are a weighted sum
+        rater.add_rater(weight=self.weights["rating"], rater=SongRatingRater())
+        rater.add_rater(weight=self.weights["tempo"], rater=BpmRater(target_bpm=self.weights["tempo_target"], spread=self.weights["tempo_spread"])) # Variety is between 0 and 50
+        # Modifiers work multiplicatively
         rater.add_modifier(weight=3., rater=RepeaterRater())
 
         self.rater = rater
-    
+
     def plugin_songs(self, songs):
         # Initiate a RatedLibrary with the given (selected) songs
         self.rated_library = RatedLibrary(songs, self.rater)
@@ -305,7 +324,7 @@ class WeightedPlaylist(SongsMenuPlugin):
         app.window.playlist.enqueue(playlist)
 
         return True
-    
+
     # we need to use classmethod since we're not an EventPlugin and are not instanciated until we're called.
     @classmethod
     def PluginPreferences(cls, plugin_container):
@@ -316,7 +335,7 @@ class WeightedPlaylist(SongsMenuPlugin):
             config.set("plugins", "weightedlibrary_%s" % key, val)
 
         vbox = Gtk.VBox(spacing=12)
-        table = Gtk.Table(n_rows=len(cls.keys) + 1, n_columns=3)
+        table = Gtk.Table(n_rows=(len(cls.options["weights"])+2*len(cls.options["values"])+2) + 1, n_columns=3)
         table.set_border_width(3)
 
         frame = Gtk.Frame(label=_("Weights"))
@@ -347,25 +366,62 @@ class WeightedPlaylist(SongsMenuPlugin):
         table.attach(hb, 2, 3, 0, 1, xpadding=3,
                      xoptions=Gtk.AttachOptions.FILL)
 
-        for (idx, (key, text)) in enumerate(cls.keys):
+        idx = 1
+        for key, text in cls.options["weights"]:
             lbl = Gtk.Label(label=text)
             lbl.set_alignment(0, 0)
-            table.attach(lbl, 0, 1, idx + 1, idx + 2,
+            table.attach(lbl, 0, 1, idx, idx + 1,
                          xoptions=Gtk.AttachOptions.FILL,
                          xpadding=3, ypadding=3)
-            adj = Gtk.Adjustment(lower=-1.0, upper=1.0, step_increment=0.1)
+            adj = Gtk.Adjustment(lower=0.0, upper=100.0, step_increment=1)
             hscale = Gtk.HScale(adjustment=adj)
-            hscale.set_value(cls.weights[key])
+            hscale.set_value(config.getfloat("plugins", "weightedlibrary_%s" % key, 0.0))
             hscale.set_draw_value(False)
             hscale.set_show_fill_level(False)
             hscale.connect("value-changed", changed_cb, key)
             lbl.set_mnemonic_widget(hscale)
-            table.attach(hscale, 1, 3, idx + 1, idx + 2,
+            table.attach(hscale, 1, 3, idx, idx + 1,
                          xpadding=3, ypadding=3)
+            idx += 1
+
+        for key, text, min_value, max_value in cls.options["values"]:
+            # Less label
+            less_lbl = Gtk.Label()
+            less_lbl.set_markup("<i>%s</i>" % min_value)
+            less_lbl.set_alignment(0, 0)
+            table.attach(less_lbl, 1, 2, idx, idx+1, xpadding=3,
+                         xoptions=Gtk.AttachOptions.FILL)
+            # More label
+            more_lbl = Gtk.Label()
+            more_lbl.set_markup("<i>%s</i>" % max_value)
+            more_lbl.set_alignment(1, 0)
+            table.attach(more_lbl, 2, 3, idx, idx+1, xpadding=3,
+                         xoptions=Gtk.AttachOptions.FILL)
+
+            idx += 1
+
+            # Scale
+            lbl = Gtk.Label(label=text)
+            lbl.set_alignment(0, 0)
+            table.attach(lbl, 0, 1, idx, idx + 1,
+                         xoptions=Gtk.AttachOptions.FILL,
+                         xpadding=3, ypadding=3)
+            adj = Gtk.Adjustment(lower=min_value, upper=max_value, step_increment=(max_value-min_value)/100.)
+            hscale = Gtk.HScale(adjustment=adj)
+            hscale.set_value(config.getfloat("plugins", "weightedlibrary_%s" % key, (max_value+min_value)/2.))
+            hscale.set_draw_value(False)
+            hscale.set_show_fill_level(False)
+            hscale.connect("value-changed", changed_cb, key)
+            lbl.set_mnemonic_widget(hscale)
+            table.attach(hscale, 1, 3, idx, idx + 1,
+                         xpadding=3, ypadding=3)
+            idx += 1
+
+
 
         return vbox
 
-        
+
 class WeightedPlaylistAll(WeightedPlaylist):
     """Same as WeightedPlaylist but ignore the selection and take all available songs."""
 
